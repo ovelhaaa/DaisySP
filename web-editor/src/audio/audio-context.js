@@ -9,7 +9,7 @@ export class AudioContextManager {
         if (this.ctx) return;
 
         this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-        await this.ctx.audioWorklet.addModule('src/audio/audio-processor.js'); // Vite serves this
+        await this.ctx.audioWorklet.addModule('audio-processor.js'); // Vite serves files in public/ at root
 
         this.node = new AudioWorkletNode(this.ctx, 'daisy-audio-processor');
         this.node.connect(this.ctx.destination);

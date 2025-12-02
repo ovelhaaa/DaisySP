@@ -56,7 +56,13 @@ export function generateCpp(nodes, edges) {
             if (inputSum === '') inputSum = '0.0f';
 
             init += `        ${safeId}.Process(${inputSum});\n`;
-            init += `        out_${node.id} = ${safeId}.Low();\n`;
+            const fType = node.data.filterType || 0;
+            if (fType === 0) init += `        out_${node.id} = ${safeId}.Low();\n`;
+            else if (fType === 1) init += `        out_${node.id} = ${safeId}.High();\n`;
+            else if (fType === 2) init += `        out_${node.id} = ${safeId}.Band();\n`;
+            else if (fType === 3) init += `        out_${node.id} = ${safeId}.Notch();\n`;
+            else if (fType === 4) init += `        out_${node.id} = ${safeId}.Peak();\n`;
+            else init += `        out_${node.id} = ${safeId}.Low();\n`;
         } else if (node.type === 'output') {
             const inputEdges = edges.filter(e => e.target === node.id);
             let inputSum = inputEdges.map(e => `out_${e.source}`).join(' + ');

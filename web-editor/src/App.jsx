@@ -202,6 +202,19 @@ export default function App() {
                   )}
                   {selectedNode.type === 'filter' && (
                       <>
+                          <label>Filter Type</label>
+                          <select
+                             value={selectedNode.data.filterType || 0}
+                             onChange={(e) => updateNodeData(selectedNode.id, { filterType: parseInt(e.target.value) })}
+                          >
+                              <option value="0">Low Pass</option>
+                              <option value="1">High Pass</option>
+                              <option value="2">Band Pass</option>
+                              <option value="3">Notch</option>
+                              <option value="4">Peak</option>
+                          </select>
+
+                          <br/><br/>
                           <label>Cutoff (Hz)</label>
                           <input
                               type="range" min="20" max="5000" step="1"

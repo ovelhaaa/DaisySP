@@ -275,13 +275,369 @@ class BufferPlayer {
     }
 }
 
+// --- New DSP Modules ---
+
+class Allpass {
+    constructor() {
+        this.buffer = new Float32Array(48000); // 1 sec max
+        this.bufferSize = 48000;
+        this.writeIdx = 0;
+        this.revTime = 0.5;
+        this.loopTime = 0.1;
+        this.sr = 48000;
+        this.coef = 0.5;
+    }
+
+    Init(sr) {
+        this.sr = sr;
+        this.CalcCoef();
+    }
+
+    SetRevTime(rt) {
+        this.revTime = rt;
+        this.CalcCoef();
+    }
+
+    SetDelay(d) {
+        this.loopTime = d;
+        this.CalcCoef();
+    }
+
+    CalcCoef() {
+        if (this.revTime <= 0) this.coef = 0;
+        else this.coef = Math.pow(10.0, (-3.0 * this.loopTime) / this.revTime);
+    }
+
+    Process(inVal) {
+        let delaySamps = Math.floor(this.loopTime * this.sr);
+        if (delaySamps >= this.bufferSize) delaySamps = this.bufferSize - 1;
+        if (delaySamps < 1) delaySamps = 1;
+
+        let readIdx = this.writeIdx - delaySamps;
+        if (readIdx < 0) readIdx += this.bufferSize;
+
+        let bufOut = this.buffer[readIdx];
+        let out = -inVal + bufOut;
+        this.buffer[this.writeIdx] = inVal + (bufOut * this.coef);
+
+        this.writeIdx++;
+        if (this.writeIdx >= this.bufferSize) this.writeIdx = 0;
+
+        return out;
+    }
+}
+
+class Phaser {
+    constructor() {
+        this.lfoPhase = 0;
+        this.lfoFreq = 0.5;
+        this.depth = 0.5;
+        this.feedback = 0.0;
+        this.lastOut = 0.0;
+
+        this.ap = new Array(6).fill(0).map(() => ({ x: 0, y: 0 }));
+        this.sr = 48000;
+    }
+
+    Init(sr) { this.sr = sr; }
+
+    SetFreq(f) { this.lfoFreq = f; }
+    SetDepth(d) { this.depth = d; }
+    SetFeedback(fb) { this.feedback = fb; }
+
+    Process(inVal) {
+        this.lfoPhase += this.lfoFreq / this.sr;
+        if (this.lfoPhase > 1) this.lfoPhase -= 1;
+        const lfo = (Math.sin(this.lfoPhase * TWO_PI) + 1.0) * 0.5;
+
+        const minFreq = 100;
+        const maxFreq = 3000;
+        const freq = minFreq + (maxFreq - minFreq) * lfo * this.depth;
+
+        const sp = Math.tan(Math.PI * freq / this.sr);
+        const a = (1.0 - sp) / (1.0 + sp);
+
+        let sig = inVal + this.lastOut * this.feedback;
+
+        for (let i = 0; i < 6; i++) {
+             let y = a * (sig - this.ap[i].y) + this.ap[i].x;
+             this.ap[i].x = sig;
+             this.ap[i].y = y;
+             sig = y;
+        }
+
+        this.lastOut = sig;
+        return sig;
+    }
+}
+
+class Compressor {
+    constructor() {
+        this.thresh = -20; // dB
+        this.ratio = 2.0;
+        this.attack = 0.01;
+        this.release = 0.1;
+        this.gain = 1.0;
+        this.sr = 48000;
+        this.env = 0.0;
+    }
+
+    Init(sr) { this.sr = sr; }
+    SetThresh(t) { this.thresh = t; }
+    SetRatio(r) { this.ratio = r; }
+
+    Process(inVal, sidechain) {
+        const det = Math.abs(sidechain);
+
+        const attCoef = Math.exp(-1.0 / (this.attack * this.sr));
+        const relCoef = Math.exp(-1.0 / (this.release * this.sr));
+
+        const coef = det > this.env ? attCoef : relCoef;
+        this.env = coef * this.env + (1.0 - coef) * det;
+
+        const env_db = 20.0 * Math.log10(this.env + 1e-6);
+        let gain_db = 0.0;
+
+        if (env_db > this.thresh) {
+            gain_db = (this.thresh - env_db) * (1.0 - 1.0 / this.ratio);
+        }
+
+        const target_gain = Math.pow(10.0, gain_db / 20.0);
+
+        return inVal * target_gain;
+    }
+}
+
+class Limiter {
+    constructor() {
+        this.thresh = -0.1;
+        this.sr = 48000;
+    }
+    Init(sr) { this.sr = sr; }
+    Process(inVal) {
+        const limit = Math.pow(10, this.thresh / 20);
+        let out = inVal;
+
+        if (out > limit) out = limit;
+        if (out < -limit) out = -limit;
+
+        return out;
+    }
+}
+
+class Delay {
+    constructor() {
+        this.buffer = new Float32Array(96000); // 2 sec
+        this.writeIdx = 0;
+        this.delayTime = 0.5;
+        this.feedback = 0.5;
+        this.mix = 0.5;
+        this.sr = 48000;
+    }
+
+    Init(sr) { this.sr = sr; }
+    SetDelay(t) { this.delayTime = t; }
+    SetFeedback(f) { this.feedback = f; }
+    SetMix(m) { this.mix = m; }
+
+    Process(inVal) {
+        let delaySamps = Math.floor(this.delayTime * this.sr);
+        if (delaySamps >= 96000) delaySamps = 95999;
+        if (delaySamps < 1) delaySamps = 1;
+
+        let readIdx = this.writeIdx - delaySamps;
+        if (readIdx < 0) readIdx += 96000;
+
+        const bufOut = this.buffer[readIdx];
+
+        // Write to buffer with feedback
+        this.buffer[this.writeIdx] = inVal + (bufOut * this.feedback);
+
+        this.writeIdx++;
+        if (this.writeIdx >= 96000) this.writeIdx = 0;
+
+        // Wet/Dry
+        return (inVal * (1.0 - this.mix)) + (bufOut * this.mix);
+    }
+}
+
+class PitchShifter {
+    constructor() {
+        this.shift = 0.0; // semitones
+        this.sr = 48000;
+        this.buffer = new Float32Array(4000); // Small buffer
+        this.writeIdx = 0;
+        this.phase = 0.0;
+        this.windowSize = 2000;
+    }
+
+    Init(sr) { this.sr = sr; }
+    SetShift(st) { this.shift = st; }
+
+    Process(inVal) {
+        const ratio = Math.pow(2.0, this.shift / 12.0);
+
+        this.buffer[this.writeIdx] = inVal;
+        this.writeIdx = (this.writeIdx + 1) % 4000;
+
+        this.phase += (1.0 - ratio) / this.windowSize;
+        if (this.phase < 0) this.phase += 1.0;
+        if (this.phase >= 1) this.phase -= 1.0;
+
+        const offset1 = this.phase * this.windowSize;
+        const offset2 = ((this.phase + 0.5) % 1.0) * this.windowSize;
+
+        const r1 = this.GetSample(this.writeIdx - offset1);
+        const r2 = this.GetSample(this.writeIdx - offset2);
+
+        const g1 = Math.sin(this.phase * Math.PI);
+        const g2 = Math.sin(((this.phase + 0.5) % 1.0) * Math.PI);
+
+        return (r1 * g1 + r2 * g2) * 0.707;
+    }
+
+    GetSample(idx) {
+        let i = Math.floor(idx);
+        if (i < 0) i += 4000;
+        if (i >= 4000) i -= 4000; // wrap
+        return this.buffer[i];
+    }
+}
+
+class Reverb {
+    constructor() {
+        this.time = 0.9;
+        this.damp = 15000;
+        this.combs = [
+            { buf: new Float32Array(2000), idx: 0, size: 1557, val: 0 },
+            { buf: new Float32Array(2000), idx: 0, size: 1617, val: 0 },
+            { buf: new Float32Array(2000), idx: 0, size: 1491, val: 0 },
+            { buf: new Float32Array(2000), idx: 0, size: 1422, val: 0 }
+        ];
+        this.allpasses = [
+            { buf: new Float32Array(1000), idx: 0, size: 225, val: 0 },
+            { buf: new Float32Array(1000), idx: 0, size: 556, val: 0 }
+        ];
+        this.sr = 48000;
+    }
+
+    Init(sr) { this.sr = sr; }
+    SetTime(t) { this.time = t; }
+    SetDamp(d) { this.damp = d; }
+
+    Process(inVal) {
+        let out = 0;
+        for (let i = 0; i < 4; i++) {
+            const c = this.combs[i];
+            const read = c.buf[c.idx];
+            const newVal = inVal + (read * this.time);
+            c.val = c.val * 0.5 + newVal * 0.5;
+            c.buf[c.idx] = c.val;
+            c.idx++;
+            if (c.idx >= c.size) c.idx = 0;
+            out += read;
+        }
+        for (let i = 0; i < 2; i++) {
+            const a = this.allpasses[i];
+            const read = a.buf[a.idx];
+            const processed = -out + read;
+            a.buf[a.idx] = out + (read * 0.5);
+            a.idx++;
+            if (a.idx >= a.size) a.idx = 0;
+            out = processed;
+        }
+        return out * 0.2;
+    }
+}
+
+class GranularDelay {
+    constructor() {
+        this.buffer = new Float32Array(48000); // 1s buffer
+        this.writeIdx = 0;
+        this.size = 0.1; // 100ms
+        this.density = 0.5;
+        this.spread = 0.1;
+        this.sr = 48000;
+
+        this.grains = [];
+        this.maxGrains = 10;
+        for(let i=0; i<this.maxGrains; i++) {
+            this.grains.push({ active: false, pos: 0, startPos: 0, life: 0, maxLife: 0, speed: 1.0 });
+        }
+
+        this.scheduler = 0;
+    }
+
+    Init(sr) { this.sr = sr; }
+    SetSize(s) { this.size = fclamp(s, 0.001, 0.5); }
+    SetDensity(d) { this.density = fclamp(d, 0.01, 1.0); }
+    SetSpread(s) { this.spread = s; }
+
+    Process(inVal) {
+        // Write
+        this.buffer[this.writeIdx] = inVal;
+
+        // Spawn Grains
+        // Density dictates rate. 1.0 = rapid fire (every 100 samples?), 0.1 = slow
+        const rate = 1.0 / (this.density * 50 + 1); // rough mapping
+        this.scheduler += 1.0/this.sr;
+
+        if (this.scheduler > rate * 0.1) { // Spawn?
+             // Find inactive grain
+             const grain = this.grains.find(g => !g.active);
+             if (grain) {
+                 grain.active = true;
+                 grain.maxLife = this.size * this.sr;
+                 grain.life = 0;
+
+                 // Random start pos (jitter) based on spread
+                 // Read from somewhat recent past
+                 const jitter = (Math.random() - 0.5) * this.spread * this.sr;
+                 let start = this.writeIdx - (this.sr * 0.1) + jitter; // 100ms delay + jitter
+                 if (start < 0) start += 48000;
+                 grain.startPos = start;
+                 grain.pos = 0;
+                 grain.speed = 1.0; // Could add pitch rand
+             }
+             this.scheduler = 0;
+        }
+
+        this.writeIdx++;
+        if (this.writeIdx >= 48000) this.writeIdx = 0;
+
+        // Process Grains
+        let out = 0.0;
+        let activeCount = 0;
+
+        for (let i = 0; i < this.maxGrains; i++) {
+            const g = this.grains[i];
+            if (g.active) {
+                // Window (Hanning)
+                const phase = g.life / g.maxLife;
+                const win = 0.5 * (1.0 - Math.cos(TWO_PI * phase));
+
+                let readIdx = g.startPos + g.pos;
+                if (readIdx >= 48000) readIdx -= 48000;
+
+                out += this.buffer[Math.floor(readIdx)] * win;
+
+                g.pos += g.speed;
+                g.life++;
+                if (g.life >= g.maxLife) g.active = false;
+                activeCount++;
+            }
+        }
+
+        return out * (1.0 / (activeCount + 1)) * 2.0; // Normalization
+    }
+}
 
 // Graph Processor
 class DaisyAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.nodes = new Map();
-    this.connections = []; // Array of {sourceId, targetId}
+    this.connections = []; // Array of {sourceId, targetId, sourceHandle, targetHandle}
     this.sampleRate = 48000;
     this.sortedOrder = [];
 
@@ -300,11 +656,11 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
           this.updateSort();
           break;
         case 'CONNECT':
-          this.connect(data.sourceId, data.targetId);
+          this.connect(data.sourceId, data.targetId, data.sourceHandle, data.targetHandle);
           this.updateSort();
           break;
         case 'DISCONNECT':
-          this.disconnect(data.sourceId, data.targetId);
+          this.disconnect(data.sourceId, data.targetId, data.sourceHandle, data.targetHandle);
           this.updateSort();
           break;
         case 'UPDATE_PARAM':
@@ -367,29 +723,69 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
 
   createNode(id, type, params) {
     let node;
+    // Default params object if undefined
+    const p = params || {};
+
     if (type === 'oscillator') {
       node = new Oscillator();
       node.Init(this.sampleRate);
-      if (params) {
-          if (params.freq !== undefined) node.SetFreq(params.freq);
-          if (params.amp !== undefined) node.SetAmp(params.amp);
-          if (params.waveform !== undefined) node.SetWaveform(params.waveform);
-      }
+      if (p.freq !== undefined) node.SetFreq(p.freq);
+      if (p.amp !== undefined) node.SetAmp(p.amp);
+      if (p.waveform !== undefined) node.SetWaveform(p.waveform);
     } else if (type === 'filter') {
       node = new Svf();
       node.Init(this.sampleRate);
-      if (params) {
-          if (params.cutoff !== undefined) node.SetFreq(params.cutoff);
-          if (params.res !== undefined) node.SetRes(params.res);
-      }
+      if (p.cutoff !== undefined) node.SetFreq(p.cutoff);
+      if (p.res !== undefined) node.SetRes(p.res);
     } else if (type === 'input') {
         node = new BufferPlayer();
     } else if (type === 'output') {
         node = { type: 'output', Process: (inVal) => inVal };
+    } else if (type === 'allpass') {
+        node = new Allpass();
+        node.Init(this.sampleRate);
+        if (p.delay !== undefined) node.SetDelay(p.delay);
+        if (p.rev_time !== undefined) node.SetRevTime(p.rev_time);
+    } else if (type === 'phaser') {
+        node = new Phaser();
+        node.Init(this.sampleRate);
+        if (p.freq !== undefined) node.SetFreq(p.freq);
+        if (p.depth !== undefined) node.SetDepth(p.depth);
+        if (p.feedback !== undefined) node.SetFeedback(p.feedback);
+    } else if (type === 'compressor') {
+        node = new Compressor();
+        node.Init(this.sampleRate);
+        if (p.thresh !== undefined) node.SetThresh(p.thresh);
+        if (p.ratio !== undefined) node.SetRatio(p.ratio);
+    } else if (type === 'limiter') {
+        node = new Limiter();
+        node.Init(this.sampleRate);
+    } else if (type === 'reverb') {
+        node = new Reverb();
+        node.Init(this.sampleRate);
+        if (p.time !== undefined) node.SetTime(p.time);
+        if (p.damp !== undefined) node.SetDamp(p.damp);
+    } else if (type === 'delay') {
+        node = new Delay();
+        node.Init(this.sampleRate);
+        if (p.time !== undefined) node.SetDelay(p.time);
+        if (p.feedback !== undefined) node.SetFeedback(p.feedback);
+        if (p.mix !== undefined) node.SetMix(p.mix);
+    } else if (type === 'pitchshifter') {
+        node = new PitchShifter();
+        node.Init(this.sampleRate);
+        if (p.shift !== undefined) node.SetShift(p.shift);
+    } else if (type === 'granulardelay') {
+        node = new GranularDelay();
+        node.Init(this.sampleRate);
+        if (p.size !== undefined) node.SetSize(p.size);
+        if (p.density !== undefined) node.SetDensity(p.density);
+        if (p.spread !== undefined) node.SetSpread(p.spread);
     }
 
     if (node) {
-      this.nodes.set(id, { instance: node, type: type, output: 0.0 });
+      // Store params in nodeData for reference (e.g. base freq)
+      this.nodes.set(id, { instance: node, type: type, output: 0.0, params: p });
     }
   }
 
@@ -398,12 +794,15 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
     this.connections = this.connections.filter(c => c.sourceId !== id && c.targetId !== id);
   }
 
-  connect(sourceId, targetId) {
-    this.connections.push({ sourceId, targetId });
+  connect(sourceId, targetId, sourceHandle, targetHandle) {
+    this.connections.push({ sourceId, targetId, sourceHandle, targetHandle });
   }
 
-  disconnect(sourceId, targetId) {
-    this.connections = this.connections.filter(c => !(c.sourceId === sourceId && c.targetId === targetId));
+  disconnect(sourceId, targetId, sourceHandle, targetHandle) {
+    this.connections = this.connections.filter(c =>
+        !(c.sourceId === sourceId && c.targetId === targetId &&
+          c.sourceHandle === sourceHandle && c.targetHandle === targetHandle)
+    );
   }
 
   updateParam(id, param, value) {
@@ -411,6 +810,10 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
     if (!nodeData) return;
     const node = nodeData.instance;
 
+    // Update stored params
+    nodeData.params[param] = value;
+
+    // Direct update logic (will be overridden by Process if modulation exists)
     if (nodeData.type === 'oscillator') {
       if (param === 'freq') node.SetFreq(value);
       if (param === 'amp') node.SetAmp(value);
@@ -419,6 +822,31 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
       if (param === 'cutoff') node.SetFreq(value);
       if (param === 'res') node.SetRes(value);
       if (param === 'filterType') nodeData.filterType = value;
+    } else if (nodeData.type === 'allpass') {
+      if (param === 'delay') node.SetDelay(value);
+      if (param === 'rev_time') node.SetRevTime(value);
+    } else if (nodeData.type === 'phaser') {
+      if (param === 'freq') node.SetFreq(value);
+      if (param === 'depth') node.SetDepth(value);
+      if (param === 'feedback') node.SetFeedback(value);
+    } else if (nodeData.type === 'compressor') {
+      if (param === 'thresh') node.SetThresh(value);
+      if (param === 'ratio') node.SetRatio(value);
+    } else if (nodeData.type === 'limiter') {
+        if (param === 'thresh') node.thresh = value;
+    } else if (nodeData.type === 'reverb') {
+        if (param === 'time') node.SetTime(value);
+        if (param === 'damp') node.SetDamp(value);
+    } else if (nodeData.type === 'delay') {
+        if (param === 'time') node.SetDelay(value);
+        if (param === 'feedback') node.SetFeedback(value);
+        if (param === 'mix') node.SetMix(value);
+    } else if (nodeData.type === 'pitchshifter') {
+        if (param === 'shift') node.SetShift(value);
+    } else if (nodeData.type === 'granulardelay') {
+        if (param === 'size') node.SetSize(value);
+        if (param === 'density') node.SetDensity(value);
+        if (param === 'spread') node.SetSpread(value);
     }
   }
 
@@ -433,12 +861,7 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
     const output = outputs[0];
     const channelCount = output.length;
 
-    // Use sortedOrder
     for (let i = 0; i < output[0].length; ++i) {
-
-        // Reset/Update inputs?
-        // We will pull inputs on demand inside the loop over sorted nodes to ensure
-        // we use the *current sample's* computed output from upstream nodes.
 
         for (const id of this.sortedOrder) {
             const nodeData = this.nodes.get(id);
@@ -447,14 +870,34 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
 
             // Gather inputs for this node
             let inputSum = 0.0;
-            // Find connections where target is this node
-            // OPTIMIZATION: pre-calculate incoming edges per node to avoid searching array every sample
-            // But for MVP JS, iterating small connection list is okay.
+            let sidechainSum = 0.0;
+            let freqMod = 0.0;
+            let ampMod = 0.0;
+            let cutoffMod = 0.0;
+            let resMod = 0.0;
+
+            // Connections to this node
             for (const conn of this.connections) {
                 if (conn.targetId === id) {
                     const sourceNode = this.nodes.get(conn.sourceId);
                     if (sourceNode) {
-                        inputSum += sourceNode.output;
+                        const val = sourceNode.output;
+
+                        // Check targetHandle
+                        const handle = conn.targetHandle;
+                        if (!handle || handle === 'in') {
+                            inputSum += val;
+                        } else if (handle === 'sidechain') {
+                            sidechainSum += val;
+                        } else if (handle === 'freq') {
+                            freqMod += val;
+                        } else if (handle === 'amp') {
+                            ampMod += val;
+                        } else if (handle === 'cutoff') {
+                            cutoffMod += val;
+                        } else if (handle === 'res') {
+                            resMod += val;
+                        }
                     }
                 }
             }
@@ -462,10 +905,28 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
             let val = 0.0;
 
              if (nodeData.type === 'oscillator') {
+                 // Apply Modulation
+                 let finalFreq = (nodeData.params.freq || 100) + freqMod;
+                 node.SetFreq(finalFreq);
+
+                 let finalAmp = (nodeData.params.amp || 0.5) + ampMod;
+                 if (finalAmp < 0) finalAmp = 0;
+                 if (finalAmp > 1) finalAmp = 1;
+                 node.SetAmp(finalAmp);
+
                  val = node.Process();
              } else if (nodeData.type === 'filter') {
+                 // Cutoff Mod
+                 let finalCutoff = (nodeData.params.cutoff || 1000) + cutoffMod;
+                 node.SetFreq(finalCutoff);
+
+                 let finalRes = (nodeData.params.res || 0.0) + resMod;
+                 if (finalRes < 0) finalRes = 0;
+                 if (finalRes > 1) finalRes = 1;
+                 node.SetRes(finalRes);
+
                  node.Process(inputSum);
-                 const fType = nodeData.filterType || 0;
+                 const fType = nodeData.params.filterType || 0;
                  if (fType === 0) val = node.Low();
                  else if (fType === 1) val = node.High();
                  else if (fType === 2) val = node.Band();
@@ -476,11 +937,29 @@ class DaisyAudioProcessor extends AudioWorkletProcessor {
                  val = node.Process();
              } else if (nodeData.type === 'output') {
                  val = inputSum;
-                 // Write to system output
-                 // Assuming mono processing, duplicate to stereo
                  for (let ch = 0; ch < channelCount; ++ch) {
                     output[ch][i] = val;
                  }
+             } else if (nodeData.type === 'allpass') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'phaser') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'compressor') {
+                 let sc = sidechainSum;
+                 const hasSC = this.connections.some(c => c.targetId === id && c.targetHandle === 'sidechain');
+                 if (!hasSC) sc = inputSum;
+
+                 val = node.Process(inputSum, sc);
+             } else if (nodeData.type === 'limiter') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'reverb') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'delay') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'pitchshifter') {
+                 val = node.Process(inputSum);
+             } else if (nodeData.type === 'granulardelay') {
+                 val = node.Process(inputSum);
              }
 
              nodeData.output = val;

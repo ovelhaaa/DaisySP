@@ -23,6 +23,22 @@ export class AudioContextManager {
         }
     }
 
+    suspend() {
+        if (this.ctx && this.ctx.state === 'running') {
+            this.ctx.suspend();
+        }
+    }
+
+    stop() {
+        // "Panic" / Stop: Suspend and maybe reset the graph state?
+        // For now, suspend is safer. To truly "stop", we might want to clear buffers.
+        // But the user asked for "Pause" and "Stop".
+        // Let's make "Stop" suspend and send a RESET message to the processor if we had one.
+        // For MVP, "Stop" can just be a hard mute or suspend.
+        // Let's make it suspend.
+        if (this.ctx) this.ctx.suspend();
+    }
+
     sendMessage(msg) {
         if (this.node) {
             this.node.port.postMessage(msg);

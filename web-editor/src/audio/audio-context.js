@@ -9,13 +9,7 @@ export class AudioContextManager {
         if (this.ctx) return;
 
         this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-        try {
-            await this.ctx.audioWorklet.addModule('/audio-processor.js');
-        } catch (e) {
-            console.error('Failed to load audio-processor.js worklet:', e);
-            // Fallback for relative paths if not at root
-            await this.ctx.audioWorklet.addModule('audio-processor.js');
-        }
+        await this.ctx.audioWorklet.addModule('audio-processor.js'); // Vite serves files in public/ at root
 
         this.node = new AudioWorkletNode(this.ctx, 'daisy-audio-processor');
         this.node.connect(this.ctx.destination);
@@ -27,6 +21,22 @@ export class AudioContextManager {
         if (this.ctx && this.ctx.state === 'suspended') {
             this.ctx.resume();
         }
+    }
+
+    suspend() {
+        if (this.ctx && this.ctx.state === 'running') {
+            this.ctx.suspend();
+        }
+    }
+
+    stop() {
+        // "Panic" / Stop: Suspend and maybe reset the graph state?
+        // For now, suspend is safer. To truly "stop", we might want to clear buffers.
+        // But the user asked for "Pause" and "Stop".
+        // Let's make "Stop" suspend and send a RESET message to the processor if we had one.
+        // For MVP, "Stop" can just be a hard mute or suspend.
+        // Let's make it suspend.
+        if (this.ctx) this.ctx.suspend();
     }
 
     sendMessage(msg) {
